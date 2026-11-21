@@ -81,11 +81,16 @@ typedef struct {
 static shell_history_t history;
 
 // Rewrite the tail while leaving the terminal cursor at the editing position.
-static void redraw_tail(const char *tail)
+static void redraw_tail(const char *tail, size_t stale_chars)
 {
-    shell_print("\x1b" "7");
     shell_print(tail);
-    shell_print("\x1b[K\x1b" "8");
+    for (size_t i = 0; i < stale_chars; ++i) {
+        putchar(' ');
+    }
+    size_t columns = strlen(tail) + stale_chars;
+    for (size_t i = 0; i < columns; ++i) {
+        putchar('\b');
+    }
 }
 
 static void shell_task(void *arg)
@@ -167,11 +172,12 @@ static void shell_task(void *arg)
                 history_age = ch == 'A' ? history_age + 1 : history_age - 1;
                 size_t index = (history.next + HISTORY_SIZE - history_age) % HISTORY_SIZE;
                 strcpy(line, history_age ? history.entries[index] : draft);
+                size_t previous_length = length;
                 length = strlen(line);
                 cursor = history_age ? length : draft_cursor;
                 shell_print("\r> ");
                 fwrite(line, 1, cursor, stdout);
-                redraw_tail(line + cursor);
+                redraw_tail(line + cursor, previous_length > length ? previous_length - length : 0);
             }
         } else if (ch == '\b' || ch == 127) {
             input_state = NORMAL;
@@ -180,7 +186,7 @@ static void shell_task(void *arg)
                 --cursor;
                 --length;
                 putchar('\b');
-                redraw_tail(line + cursor);
+                redraw_tail(line + cursor, 1);
             }
         } else if (ch >= ' ' || ch == '\t') {
             input_state = NORMAL;
@@ -193,7 +199,7 @@ static void shell_task(void *arg)
                 ++length;
                 putchar(line[cursor - 1]);
                 if (cursor < length) {
-                    redraw_tail(line + cursor);
+                    redraw_tail(line + cursor, 0);
                 }
             }
         }
