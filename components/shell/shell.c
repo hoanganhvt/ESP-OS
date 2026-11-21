@@ -70,10 +70,33 @@ static void run_line(char *line)
     putchar('\n');
 }
 
+enum { LINE_SIZE = 128, HISTORY_SIZE = 8 };
+
+typedef struct {
+    char entries[HISTORY_SIZE][LINE_SIZE];
+    size_t next;
+    size_t count;
+} shell_history_t;
+
+static shell_history_t history;
+
+// Rewrite the tail while leaving the terminal cursor at the editing position.
+static void redraw_tail(const char *tail)
+{
+    shell_print("\x1b" "7");
+    shell_print(tail);
+    shell_print("\x1b[K\x1b" "8");
+}
+
 static void shell_task(void *arg)
 {
     (void)arg;
-    char line[128];
+    char line[LINE_SIZE] = "";
+    char draft[LINE_SIZE];
+    size_t draft_cursor = 0;
+    size_t history_age = 0;
+    size_t cursor = 0;
+    enum { NORMAL, ESCAPE, ARROW, SKIP_SEQUENCE } input_state = NORMAL;
     size_t length = 0;
     bool overflow = false;
     bool after_cr = false;
@@ -94,30 +117,84 @@ static void shell_task(void *arg)
             continue;
         }
         if (ch == '\r' || ch == '\n') {
+            input_state = NORMAL;
             putchar('\n');
             if (overflow) {
                 shell_print("Line too long\n");
             } else {
-                line[length] = '\0';
+                if (strspn(line, " ") < length) {
+                    strcpy(history.entries[history.next], line);
+                    history.next = (history.next + 1) % HISTORY_SIZE;
+                    if (history.count < HISTORY_SIZE) {
+                        ++history.count;
+                    }
+                }
                 run_line(line);
             }
             length = 0;
+            cursor = 0;
+            line[0] = '\0';
+            history_age = 0;
             overflow = false;
             shell_print("> ");
         } else if (overflow) {
             continue;  // Discard the entire oversized command through Enter.
+        } else if (ch == 0x1b) {
+            input_state = ESCAPE;
+        } else if (input_state == ESCAPE && (ch == '[' || ch == 'O')) {
+            input_state = ARROW;
+        } else if (input_state == ARROW || input_state == SKIP_SEQUENCE) {
+            if (ch >= 0x20 && ch <= 0x3f) {
+                input_state = SKIP_SEQUENCE;
+                continue;
+            }
+            bool plain = input_state == ARROW;
+            input_state = NORMAL;
+            if (!plain) {
+                continue;
+            }
+            if (ch == 'D' && cursor > 0) {
+                --cursor;
+                putchar('\b');
+            } else if (ch == 'C' && cursor < length) {
+                putchar(line[cursor++]);
+            } else if ((ch == 'A' && history_age < history.count) ||
+                       (ch == 'B' && history_age > 0)) {
+                if (history_age == 0) {
+                    strcpy(draft, line);
+                    draft_cursor = cursor;
+                }
+                history_age = ch == 'A' ? history_age + 1 : history_age - 1;
+                size_t index = (history.next + HISTORY_SIZE - history_age) % HISTORY_SIZE;
+                strcpy(line, history_age ? history.entries[index] : draft);
+                length = strlen(line);
+                cursor = history_age ? length : draft_cursor;
+                shell_print("\r> ");
+                fwrite(line, 1, cursor, stdout);
+                redraw_tail(line + cursor);
+            }
         } else if (ch == '\b' || ch == 127) {
-            if (length > 0) {
+            input_state = NORMAL;
+            if (cursor > 0) {
+                memmove(line + cursor - 1, line + cursor, length - cursor + 1);
+                --cursor;
                 --length;
-                shell_print("\b \b");
+                putchar('\b');
+                redraw_tail(line + cursor);
             }
         } else if (ch >= ' ' || ch == '\t') {
+            input_state = NORMAL;
             if (length == sizeof(line) - 1) {
                 overflow = true;
                 putchar('\a');
             } else {
-                line[length++] = ch == '\t' ? ' ' : (char)ch;
-                putchar(line[length - 1]);
+                memmove(line + cursor + 1, line + cursor, length - cursor + 1);
+                line[cursor++] = ch == '\t' ? ' ' : (char)ch;
+                ++length;
+                putchar(line[cursor - 1]);
+                if (cursor < length) {
+                    redraw_tail(line + cursor);
+                }
             }
         }
     }
